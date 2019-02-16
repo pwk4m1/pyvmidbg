@@ -2,8 +2,9 @@ import logging
 import re
 
 from libvmi import AccessContext, TranslateMechanism, X86Reg
-from libvmi.event import RegEvent, RegAccess
+from libvmi.event import RegEvent, RegAccess, SingleStepEvent
 
+IRET = b'\xcd'
 
 class LinuxThread:
 
@@ -34,7 +35,7 @@ class LinuxTaskDescriptor:
         self.next_desc = task_addr - self.vmi.get_offset('linux_tasks')
 
     def __str__(self):
-        return "[{}] {} @{}".format(self.pid, self.name, hex(self.addr))
+        return "[{}] {} @{} ({})".format(self.pid, self.name, hex(self.addr), hex(self.dtb))
 
 
 class LinuxDebugContext:
@@ -64,6 +65,7 @@ class LinuxDebugContext:
             logging.warning('Found %s processes matching "%s", picking the first match ([%s])',
                             len(found), self.target_name, found[0].pid)
         self.target_desc = found[0]
+        self.log.info('Task %s', self.target_desc)
         # 3 - check if kernel thread (not supported)
         if self.target_desc.mm == 0:
             raise RuntimeError('intercepting kernel threads is not supported')
@@ -73,8 +75,6 @@ class LinuxDebugContext:
         }
 
         def cb_on_cr3_load(vmi, event):
-            # TODO find process by matching CR3 directly
-            # it doesn't work for now
             desc = self.dtb_to_desc(event.cffi_event.reg_event.value)
             self.log.info('intercepted %s', desc)
             if desc.dtb == self.target_desc.dtb:
@@ -91,6 +91,30 @@ class LinuxDebugContext:
         self.vmi.listen(0)
         # clear event
         self.vmi.clear_event(reg_event)
+        return
+        cb_data = {
+            'interrupted': False
+        }
+
+        def cb_on_sstep(vmi, event):
+            buffer, bytes_read = self.vmi.read_va(event.cffi_event.x86_regs.rip, self.target_desc.pid, len(IRET))
+            self.log.info('singlestep @%s - byte: %s', hex(event.cffi_event.x86_regs.rip), buffer)
+            if buffer == IRET:
+                self.vmi.pause_vm()
+                cb_data['interrupted'] = True
+
+        # 5 - singlestep until iret instruction
+        num_vcpus = self.vmi.get_num_vcpus()
+        ss_event = SingleStepEvent(range(num_vcpus), cb_on_sstep)
+        self.vmi.register_event(ss_event)
+        self.vmi.resume_vm()
+        while not cb_data['interrupted']:
+            self.vmi.listen(1000)
+        # clear queue
+        self.vmi.listen(0)
+        # clear event
+        self.vmi.clear_event(reg_event)
+
 
     def detach(self):
         self.vmi.resume_vm()

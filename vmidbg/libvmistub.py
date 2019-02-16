@@ -87,6 +87,8 @@ class LibVMIStub(GDBStub):
                     self.ctx = LinuxDebugContext(self.vmi, self.process)
                 else:
                     raise RuntimeError('unhandled ostype: {}'.format(ostype.value))
+            self.ctx.attach()
+            self.attached = True
             # register some events
             # register interrupt event
             self.int_event = IntEvent(self.cb_on_int3)
@@ -96,8 +98,6 @@ class LibVMIStub(GDBStub):
             num_vcpus = self.vmi.get_num_vcpus()
             self.ss_event_recoil = SingleStepEvent(range(num_vcpus), self.cb_on_sstep_recoil, enable=False)
             self.vmi.register_event(self.ss_event_recoil)
-            self.ctx.attach()
-            self.attached = True
         except:
             logging.exception('Exception while initializing debug context')
         return self
